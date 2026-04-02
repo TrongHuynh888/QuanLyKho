@@ -1,0 +1,5 @@
+{
+  "name": "TAIKA SEAFOOD",
+  "description": "A production-grade Warehouse Management System for seafood processing and export, featuring multi-location inventory, FEFO/FIFO logic, and PWA mobile scanning.",
+  "requestFramePermissions": ["camera"]
+}
