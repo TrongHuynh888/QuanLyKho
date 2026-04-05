@@ -7,12 +7,13 @@ import type { InventoryItem, Warehouse } from "../types/supabase";
 import {
   CheckCircle2,
   Download,
-  History,
+  ArrowRightLeft,
   Loader2,
   AlertCircle,
   Boxes,
   List,
   Map,
+  Filter,
 } from "lucide-react";
 
 import InventoryStats from "../components/inventory/InventoryStats";
@@ -29,22 +30,64 @@ export default function InventoryView({ onAction }: InventoryViewProps) {
   const { t } = useTranslation();
   const [inventory, setInventory] = useState<InventoryItem[]>([]);
   const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
+  const [categories, setCategories] = useState<{id: string; name: string}[]>([]);
   const [selectedWarehouse, setSelectedWarehouse] = useState("all");
+  const [selectedCategory, setSelectedCategory] = useState("all");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<ViewTab>("list");
+  const [bulkTransferMode, setBulkTransferMode] = useState(false);
+  const [targetLocationId, setTargetLocationId] = useState<string | null>(null);
+
+  // Listen for bulk transfer activation from other views (e.g. Dashboard)
+  useEffect(() => {
+    const handler = () => {
+      if (selectedWarehouse === "all" && warehouses.length > 0) {
+        setSelectedWarehouse(warehouses[0].id);
+      }
+      setActiveTab("map");
+      setBulkTransferMode(true);
+    };
+    const navHandler = (e: any) => {
+      const whId = e.detail?.warehouseId;
+      const locId = e.detail?.locationId;
+      if (whId) {
+        setSelectedWarehouse(whId);
+        setActiveTab("map");
+        if (locId) setTargetLocationId(locId);
+      }
+    };
+    
+    // Check for pending navigation set by App.tsx before this component mounted
+    const pending = (window as any).__pendingWarehouseNav;
+    if (pending?.warehouseId) {
+      setSelectedWarehouse(pending.warehouseId);
+      setActiveTab("map");
+      if (pending.locationId) setTargetLocationId(pending.locationId);
+      delete (window as any).__pendingWarehouseNav;
+    }
+    
+    window.addEventListener("activate-bulk-transfer", handler);
+    window.addEventListener("navigate-to-warehouse-map", navHandler);
+    return () => {
+      window.removeEventListener("activate-bulk-transfer", handler);
+      window.removeEventListener("navigate-to-warehouse-map", navHandler);
+    };
+  }, [warehouses, selectedWarehouse]);
 
   useEffect(() => {
     fetchData();
   }, []);
 
   async function fetchData() {
-    setLoading(true);
+    if (inventory.length === 0) setLoading(true);
     setError(null);
     try {
-      const [invRes, whRes] = await Promise.all([
-        fetch("/api/inventory"),
-        fetch("/api/warehouses"),
+      const ts = Date.now();
+      const [invRes, whRes, catRes] = await Promise.all([
+        fetch(`/api/inventory?_t=${ts}`),
+        fetch(`/api/warehouses?_t=${ts}`),
+        fetch(`/api/categories?_t=${ts}`),
       ]);
       if (!invRes.ok) throw new Error(`Inventory: HTTP ${invRes.status}`);
       if (!whRes.ok) throw new Error(`Warehouses: HTTP ${whRes.status}`);
@@ -53,6 +96,7 @@ export default function InventoryView({ onAction }: InventoryViewProps) {
       const whData = await whRes.json();
       setInventory(invData || []);
       setWarehouses(whData || []);
+      if (catRes.ok) setCategories(await catRes.json());
     } catch (err: any) {
       setError(err.message);
       toast.error(t("error_loading_data"));
@@ -60,14 +104,14 @@ export default function InventoryView({ onAction }: InventoryViewProps) {
     setLoading(false);
   }
 
-  const filteredInventory =
-    selectedWarehouse === "all"
-      ? inventory
-      : inventory.filter((item) => item.warehouse_id === selectedWarehouse);
+  const filteredInventory = inventory
+    .filter((item) => selectedWarehouse === "all" || item.warehouse_id === selectedWarehouse)
+    .filter((item) => selectedCategory === "all" || (item.products as any)?.categories?.id === selectedCategory || (item.products as any)?.category_id === selectedCategory);
 
   const handleViewOnMap = (locationId: string, warehouseId: string) => {
-    setActiveTab("map");
+    setTargetLocationId(locationId);
     setSelectedWarehouse(warehouseId);
+    setActiveTab("map");
   };
 
   if (loading) {
@@ -108,27 +152,52 @@ export default function InventoryView({ onAction }: InventoryViewProps) {
             <CheckCircle2 size={16} /> {t("stock_take")}
           </button>
           <button
-            onClick={() => onAction("internal_transfer")}
-            className="px-4 py-2.5 bg-white dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-700 rounded-xl text-sm font-bold hover:bg-neutral-50 dark:hover:bg-neutral-800 transition-all flex items-center gap-2 text-neutral-700 dark:text-neutral-300"
+            onClick={() => {
+              // Activate bulk transfer: switch to map + enable bulk mode
+              if (selectedWarehouse === "all" && warehouses.length > 0) {
+                setSelectedWarehouse(warehouses[0].id);
+              }
+              setActiveTab("map");
+              setBulkTransferMode(true);
+            }}
+            className={cn(
+              "px-4 py-2.5 rounded-xl text-sm font-bold transition-all flex items-center gap-2",
+              bulkTransferMode
+                ? "bg-blue-600 text-white shadow-lg shadow-blue-500/20"
+                : "bg-white dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-700 hover:bg-neutral-50 dark:hover:bg-neutral-800 text-neutral-700 dark:text-neutral-300"
+            )}
           >
-            <History size={16} /> {t("transfer")}
+            <ArrowRightLeft size={16} /> {t("transfer")}
           </button>
           <button className="px-4 py-2.5 bg-white dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-700 rounded-xl text-sm font-bold hover:bg-neutral-50 dark:hover:bg-neutral-800 transition-all flex items-center gap-2 text-neutral-700 dark:text-neutral-300">
             <Download size={16} /> {t("export")}
           </button>
         </div>
-        <select
-          value={selectedWarehouse}
-          onChange={(e) => setSelectedWarehouse(e.target.value)}
-          className="px-4 py-2.5 bg-white dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-700 rounded-xl text-sm font-bold outline-none focus:ring-2 focus:ring-taika-blue text-neutral-900 dark:text-neutral-50"
-        >
-          <option value="all">{t("all_warehouses")}</option>
-          {warehouses.map((wh) => (
-            <option key={wh.id} value={wh.id}>
-              {wh.name}
-            </option>
-          ))}
-        </select>
+        <div className="flex gap-2 flex-wrap">
+          {/* Category filter */}
+          <div className="relative">
+            <Filter size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-neutral-400" />
+            <select
+              value={selectedCategory}
+              onChange={(e) => setSelectedCategory(e.target.value)}
+              className="pl-8 pr-4 py-2.5 bg-white dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-700 rounded-xl text-sm font-bold outline-none focus:ring-2 focus:ring-taika-blue text-neutral-900 dark:text-neutral-50"
+            >
+              <option value="all">{t("all_categories", "Tất cả danh mục")}</option>
+              {categories.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+          </div>
+          {/* Warehouse filter */}
+          <select
+            value={selectedWarehouse}
+            onChange={(e) => setSelectedWarehouse(e.target.value)}
+            className="px-4 py-2.5 bg-white dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-700 rounded-xl text-sm font-bold outline-none focus:ring-2 focus:ring-taika-blue text-neutral-900 dark:text-neutral-50"
+          >
+            <option value="all">{t("all_warehouses")}</option>
+            {warehouses.map((wh) => (
+              <option key={wh.id} value={wh.id}>{wh.name}</option>
+            ))}
+          </select>
+        </div>
       </div>
 
       {/* Summary Stats */}
@@ -192,6 +261,11 @@ export default function InventoryView({ onAction }: InventoryViewProps) {
             warehouses={warehouses}
             selectedWarehouseId={selectedWarehouse}
             onSelectWarehouse={setSelectedWarehouse}
+            onDataChange={fetchData}
+            bulkMode={bulkTransferMode}
+            onBulkModeChange={setBulkTransferMode}
+            externalFocusLocationId={targetLocationId}
+            onClearFocus={() => setTargetLocationId(null)}
           />
         )}
       </motion.div>

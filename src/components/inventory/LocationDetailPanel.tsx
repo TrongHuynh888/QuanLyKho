@@ -1,3 +1,4 @@
+import React from "react";
 import { useTranslation } from "react-i18next";
 import { motion } from "motion/react";
 import { cn } from "../../lib/utils";
@@ -14,15 +15,18 @@ import {
 import type { Warehouse, LocationWithInventory } from "../../types/supabase";
 
 interface LocationDetailPanelProps {
+  key?: React.Key;
   location: LocationWithInventory;
   warehouse: Warehouse;
   onClose: () => void;
+  onTransfer: () => void;
 }
 
 export default function LocationDetailPanel({
   location,
   warehouse,
   onClose,
+  onTransfer,
 }: LocationDetailPanelProps) {
   const { t } = useTranslation();
 
@@ -221,7 +225,11 @@ export default function LocationDetailPanel({
 
       {/* Actions */}
       <div className="p-4 border-t border-neutral-100 dark:border-neutral-800 bg-neutral-50/50 dark:bg-neutral-900/50">
-        <button className="w-full px-4 py-2.5 bg-taika-blue text-white rounded-xl text-sm font-bold hover:bg-taika-blue/90 transition-all flex items-center justify-center gap-2 shadow-lg shadow-taika-blue/10">
+        <button
+          onClick={onTransfer}
+          disabled={location.inventory_items.length === 0}
+          className="w-full px-4 py-2.5 bg-taika-blue text-white rounded-xl text-sm font-bold hover:bg-taika-blue/90 transition-all flex items-center justify-center gap-2 shadow-lg shadow-taika-blue/10 disabled:opacity-50 disabled:cursor-not-allowed"
+        >
           <ArrowRightLeft size={16} />
           {t("transfer")}
         </button>

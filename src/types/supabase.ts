@@ -30,6 +30,13 @@ export type Product = {
   size: string | null;
   state: 'raw' | 'cooked' | 'processed';
   min_stock_level: number;
+  image_url: string | null;
+  description?: string | null;
+  ingredients?: string | null;
+  import_price?: number;
+  wholesale_price?: number;
+  retail_price?: number;
+  created_at?: string;
   categories?: Category;
   uoms?: UnitOfMeasurement;
 };
@@ -64,6 +71,8 @@ export type StorageLocation = {
 };
 
 export type LocationInventoryItem = {
+  product_id: string;
+  batch_id: string | null;
   product_name: string;
   sku: string;
   quantity: number;
@@ -152,4 +161,16 @@ export type Activity = {
   products?: Product;
   warehouses?: Warehouse;
   profiles?: { full_name: string };
+};
+
+export type Customer = {
+  id: string;
+  name: string;
+  contact_person: string | null;
+  email: string | null;
+  phone: string | null;
+  address: string | null;
+  status: 'active' | 'pending' | 'inactive';
+  notes: string | null;
+  created_at: string;
 };

@@ -1,18 +1,28 @@
-import React, { useState, useMemo, useEffect, useRef, useCallback } from "react";
+import React, { useState, useMemo, useEffect, useRef, useCallback, Suspense, lazy } from "react";
 import { useTranslation } from "react-i18next";
 import { AnimatePresence } from "motion/react";
 import { cn } from "../../lib/utils";
 import {
   Thermometer, Loader2, AlertCircle, MapPin,
-  ZoomIn, ZoomOut, Maximize2, RotateCcw, Search,
+  ZoomIn, ZoomOut, Maximize2, Minimize2, Focus, RotateCw, Search, Box,
 } from "lucide-react";
 import type { Warehouse, LocationWithInventory } from "../../types/supabase";
 import LocationDetailPanel from "./LocationDetailPanel";
+import TransferModal from "./TransferModal";
+import BulkTransferWizard, { type BulkPhase } from "./BulkTransferWizard";
+
+const WarehouseMap3D = lazy(() => import("./WarehouseMap3D"));
 
 interface WarehouseMapProps {
   warehouses: Warehouse[];
   selectedWarehouseId: string;
   onSelectWarehouse: (id: string) => void;
+  onDataChange?: () => void;
+  bulkMode?: boolean;
+  onBulkModeChange?: (on: boolean) => void;
+  initialSearchSku?: string;
+  externalFocusLocationId?: string | null;
+  onClearFocus?: () => void;
 }
 
 // ── Bin colour ────────────────────────────────────────────────────────────────
@@ -34,7 +44,7 @@ function resolveBinColor(loc: LocationWithInventory | undefined, isDark: boolean
   }
 
   if (hasSearchProduct) {
-    return { fill: "#ef4444", stroke: "#b91c1c", text: "#fff", isHighlighted: true };
+    return { fill: "#84cc16", stroke: "#65a30d", text: "#000", isHighlighted: true };
   }
 
   if (loc.status === "maintenance") return { fill: "#f59e0b", stroke: "#d97706", text: "#fff" };
@@ -70,7 +80,7 @@ function buildGrid(locations: LocationWithInventory[], warehouse: any) {
 
 // ── SVG Floor Plan ────────────────────────────────────────────────────────────
 const BW = 46, BH = 40, BG = 8, RG = 16, ZG = 26;
-const HEADER = 46, PICK_W = 90, AISLE = 46, BOTTOM = 130, PAD = 20;
+const HEADER = 46, PICK_W = 90, AISLE = 46, BOTTOM = 60, PAD = 20;
 
 function computeMapDimensions(nZ: number, nR: number, nB: number, zonesPerRow: number | null | undefined) {
   const maxZ = zonesPerRow && zonesPerRow > 0 ? zonesPerRow : Math.max(nZ, 1);
@@ -93,13 +103,17 @@ function computeMapDimensions(nZ: number, nR: number, nB: number, zonesPerRow: n
   return { gridLeft, gridW, gridH, singleGridH, ROW_GAP, VW, VH, maxZ, rackW, rowH };
 }
 
-function FloorPlanSVG({ locations, warehouse, isDark, onBin, selectedId, searchSku }: {
+function FloorPlanSVG({ locations, warehouse, isDark, onBin, selectedId, searchSku, sourceId, bulkSelectedIds, bulkMode, destProjectedUsage }: {
   locations: LocationWithInventory[];
   warehouse: Warehouse;
   isDark: boolean;
   onBin: (loc: LocationWithInventory | null) => void;
   selectedId: string | null;
   searchSku?: string;
+  sourceId?: string | null;
+  bulkSelectedIds?: Set<string>;
+  bulkMode?: "source" | "dest" | null;
+  destProjectedUsage?: Map<string, { type: 'full' | 'partial' | 'unused' }>;
 }) {
   const { t } = useTranslation();
   const { zones, racks, bins, lookup, nZ, nR, nB } = buildGrid(locations, warehouse);
@@ -130,8 +144,8 @@ function FloorPlanSVG({ locations, warehouse, isDark, onBin, selectedId, searchS
     <svg viewBox={`0 0 ${VW} ${VH}`} width={VW} height={VH}
       style={{ display: "block", minWidth: VW }}>
       {/* Floor */}
-      <rect width={VW} height={VH} rx={10} fill={bg} />
-      <rect x={4} y={4} width={VW - 8} height={VH - 8} rx={8} fill={floor} />
+      <rect width={VW} height={VH} rx={16} fill={bg} />
+      <rect x={4} y={4} width={VW - 8} height={VH - 8} rx={12} fill={floor} stroke={isDark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.08)"} strokeWidth={2} />
 
       {/* Picking zone */}
       <rect x={PAD} y={PAD} width={PICK_W - 8} height={gridH - PAD + AISLE / 2}
@@ -191,28 +205,93 @@ function FloorPlanSVG({ locations, warehouse, isDark, onBin, selectedId, searchS
                 const loc = lookup.get(key);
                 const { fill, stroke, text, isHighlighted } = resolveBinColor(loc, isDark, searchSku) as any;
                 const selected = !!loc && selectedId === loc.id;
+                const isSource = !!loc && sourceId === loc.id;
+                const isBulkSelected = !!loc && bulkSelectedIds?.has(loc.id);
+
+                // In bulk mode, determine if bin is clickable
+                const bulkClickable = bulkMode === "source"
+                  ? (!!loc && loc.total_quantity > 0)
+                  : bulkMode === "dest"
+                    ? (!!loc && loc.utilization < 100)
+                    : true;
+
+                // Custom colors for bulk destiny projection
+                const usageType = bulkMode === "dest" && isBulkSelected && loc ? destProjectedUsage?.get(loc.id)?.type : null;
+                
+                let bulkFill = fill;
+                let bulkStroke = stroke;
+                let bulkText = text;
+
+                if (isBulkSelected) {
+                  if (bulkMode === "source") {
+                    bulkFill = isDark ? "rgba(59,130,246,0.3)" : "rgba(59,130,246,0.15)";
+                    bulkStroke = "#3b82f6";
+                    bulkText = "#60a5fa";
+                  } else if (bulkMode === "dest") {
+                    if (usageType === 'full') {
+                      bulkFill = isDark ? "rgba(16,185,129,0.4)" : "rgba(16,185,129,0.2)";
+                      bulkStroke = "#10b981"; // emerald
+                      bulkText = "#34d399";
+                    } else if (usageType === 'partial') {
+                      bulkFill = isDark ? "rgba(245,158,11,0.3)" : "rgba(245,158,11,0.15)";
+                      bulkStroke = "#f59e0b"; // amber
+                      bulkText = "#fbbf24";
+                    } else if (usageType === 'unused') {
+                      bulkFill = isDark ? "rgba(107,114,128,0.2)" : "rgba(156,163,175,0.1)";
+                      bulkStroke = "#9ca3af"; // neutral
+                      bulkText = "#9ca3af";
+                    } else {
+                      bulkFill = isDark ? "rgba(16,185,129,0.3)" : "rgba(16,185,129,0.15)";
+                      bulkStroke = "#10b981"; // emerald
+                      bulkText = "#34d399";
+                    }
+                  }
+                }
 
                 return (
                   <g key={key}>
-                    {selected && (
+                    {/* Bulk selected highlight */}
+                    {isBulkSelected && (
+                      <rect x={bx - 3} y={by - 3} width={BW + 6} height={BH + 6}
+                        rx={5} fill="none"
+                        stroke={usageType === 'unused' ? "#9ca3af" : (bulkMode === "source" ? "#3b82f6" : "#10b981")}
+                        strokeWidth={2.5}
+                        strokeDasharray={usageType === 'unused' ? "2 3" : "4 2"} />
+                    )}
+                    {selected && !isSource && !isBulkSelected && (
                       <rect x={bx - 2} y={by - 2} width={BW + 4} height={BH + 4}
                         rx={4} fill="none" stroke="#3b82f6" strokeWidth={1.5}
                         strokeDasharray="3 2" />
                     )}
+                    {isSource && (
+                      <rect x={bx - 2} y={by - 2} width={BW + 4} height={BH + 4}
+                        rx={4} fill="none" stroke="#a855f7" strokeWidth={2}
+                        strokeDasharray="3 2" />
+                    )}
                     {isHighlighted && (
-                      <rect x={bx - 2.5} y={by - 2.5} width={BW + 5} height={BH + 5}
-                        rx={5} fill="none" stroke="#ef4444" strokeWidth={2.5}
-                        className="animate-pulse" />
+                      <>
+                        <rect x={bx - 5} y={by - 5} width={BW + 10} height={BH + 10}
+                          rx={7} fill="rgba(132,204,22,0.15)" stroke="none" />
+                        <rect x={bx - 3.5} y={by - 3.5} width={BW + 7} height={BH + 7}
+                          rx={6} fill="none" stroke="#a3e635" strokeWidth={3}
+                          className="animate-pulse" />
+                      </>
                     )}
                     <rect x={bx} y={by} width={BW} height={BH} rx={4}
-                      fill={fill} stroke={stroke} strokeWidth={selected ? 1.5 : 1}
-                      className={loc ? "cursor-pointer" : "cursor-default"}
-                      onClick={() => loc ? onBin(loc) : null}
+                      fill={isBulkSelected ? bulkFill : fill}
+                      stroke={isBulkSelected ? bulkStroke : stroke}
+                      strokeWidth={isBulkSelected ? 1.5 : (selected ? 1.5 : 1)}
+                      className={bulkMode ? (bulkClickable ? "cursor-pointer" : "cursor-not-allowed opacity-40") : (loc ? "cursor-pointer" : "cursor-default")}
+                      onClick={() => {
+                        if (bulkMode && !bulkClickable) return;
+                        if (loc) onBin(loc);
+                      }}
                       style={{ transition: "fill 0.1s" }}
                     />
                     <text x={bx + BW / 2} y={by + BH / 2 + 2.5}
-                      textAnchor="middle" fontSize={7.5} fontWeight={selected ? "900" : "700"}
-                      fill={text} className="pointer-events-none select-none">{bin}</text>
+                      textAnchor="middle" fontSize={7.5} fontWeight={isBulkSelected || selected ? "900" : "700"}
+                      fill={isBulkSelected ? bulkText : text}
+                      className="pointer-events-none select-none">{bin}</text>
                     {loc && loc.utilization > 0 && (
                       <rect x={bx + 2} y={by + BH - 3}
                         width={Math.max(1, (BW - 4) * loc.utilization / 100)} height={2}
@@ -262,14 +341,100 @@ function FloorPlanSVG({ locations, warehouse, isDark, onBin, selectedId, searchS
 // ── Main ──────────────────────────────────────────────────────────────────────
 const ZOOM_MIN = 0.4, ZOOM_MAX = 3, ZOOM_STEP = 0.2;
 
-export default function WarehouseMap({ warehouses, selectedWarehouseId, onSelectWarehouse }: WarehouseMapProps) {
+export default function WarehouseMap({ warehouses, selectedWarehouseId, onSelectWarehouse, onDataChange, bulkMode: bulkModeExternal,
+  onBulkModeChange,
+  initialSearchSku,
+  externalFocusLocationId,
+  onClearFocus
+}: WarehouseMapProps) {
   const { t } = useTranslation();
   const [locations, setLocations] = useState<LocationWithInventory[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selectedLocation, setSelectedLocation] = useState<LocationWithInventory | null>(null);
+  const [showTransferModal, setShowTransferModal] = useState(false);
+  const [transferSource, setTransferSource] = useState<{ location: LocationWithInventory; warehouse: Warehouse } | null>(null);
+  const [transferDestLoc, setTransferDestLoc] = useState<LocationWithInventory | null>(null);
   const [isDark, setIsDark] = useState(() => document.documentElement.classList.contains("dark"));
-  const [searchSku, setSearchSku] = useState("");
+  const [searchSku, setSearchSku] = useState(initialSearchSku || "");
+  const [searchWarehouse, setSearchWarehouse] = useState("");
+  const [viewMode, setViewMode] = useState<"2d" | "3d">("2d");
+
+  // ── Bulk Transfer State ──
+  const [bulkPhase, setBulkPhase] = useState<BulkPhase | null>(null);
+  const [bulkSourceLocs, setBulkSourceLocs] = useState<LocationWithInventory[]>([]);
+  const [bulkDestLocs, setBulkDestLocs] = useState<LocationWithInventory[]>([]);
+  const [bulkDestWarehouseId, setBulkDestWarehouseId] = useState("");
+  const [bulkSourceWarehouseId, setBulkSourceWarehouseId] = useState("");
+
+  const bulkSourceIds = useMemo(() => new Set(bulkSourceLocs.map(l => l.id)), [bulkSourceLocs]);
+  const bulkDestIds = useMemo(() => new Set(bulkDestLocs.map(l => l.id)), [bulkDestLocs]);
+
+  // Project destination usage to color bins correctly
+  const destProjectedUsage = useMemo(() => {
+    if (bulkPhase !== "select_dest") return undefined;
+    const usage = new Map<string, { type: 'full' | 'partial' | 'unused' }>();
+    const totalSourceKg = bulkSourceLocs.reduce((sum, loc) => sum + (loc.total_quantity || 0), 0);
+    
+    const pool = bulkDestLocs.map(loc => ({
+      id: loc.id,
+      remaining: (loc.capacity || 5000) - (loc.total_quantity || 0)
+    })).sort((a, b) => b.remaining - a.remaining);
+
+    let remainingToPlace = totalSourceKg;
+
+    for (const bin of pool) {
+      if (remainingToPlace <= 0) {
+        usage.set(bin.id, { type: 'unused' });
+      } else if (remainingToPlace >= bin.remaining) {
+        usage.set(bin.id, { type: 'full' });
+        remainingToPlace -= bin.remaining;
+      } else {
+        usage.set(bin.id, { type: 'partial' });
+        remainingToPlace = 0;
+      }
+    }
+    return usage;
+  }, [bulkPhase, bulkSourceLocs, bulkDestLocs]);
+
+  // Activate bulk mode from external
+  useEffect(() => {
+    if (bulkModeExternal && !bulkPhase) {
+      setBulkPhase("select_source");
+      setBulkSourceWarehouseId(selectedWarehouseId);
+      setBulkSourceLocs([]);
+      setBulkDestLocs([]);
+    } else if (!bulkModeExternal && bulkPhase) {
+      setBulkPhase(null);
+      setBulkSourceLocs([]);
+      setBulkDestLocs([]);
+    }
+  }, [bulkModeExternal]);
+
+  const closeBulkMode = useCallback(() => {
+    setBulkPhase(null);
+    setBulkSourceLocs([]);
+    setBulkDestLocs([]);
+    if (onBulkModeChange) onBulkModeChange(false);
+    // Return to source warehouse
+    if (bulkSourceWarehouseId && bulkSourceWarehouseId !== selectedWarehouseId) {
+      onSelectWarehouse(bulkSourceWarehouseId);
+    }
+  }, [onBulkModeChange, bulkSourceWarehouseId, selectedWarehouseId, onSelectWarehouse]);
+
+  const openTransferModal = useCallback(() => {
+    if (selectedLocation && selectedWarehouse) {
+      setTransferSource({ location: selectedLocation, warehouse: selectedWarehouse });
+      setShowTransferModal(true);
+      setSelectedLocation(null);
+    }
+  }, [selectedLocation]);
+
+  const closeTransferModal = useCallback(() => {
+    setShowTransferModal(false);
+    setTransferSource(null);
+    setTransferDestLoc(null);
+  }, []);
 
   const productsInWarehouse = useMemo(() => {
     const items = new Map();
@@ -289,6 +454,7 @@ export default function WarehouseMap({ warehouses, selectedWarehouseId, onSelect
   const [zoom, setZoom] = useState(1);
   const [minZoom, setMinZoom] = useState(ZOOM_MIN);
   const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [rotation, setRotation] = useState(0);
   const dragging = useRef(false);
   const dragStart = useRef({ x: 0, y: 0, panX: 0, panY: 0 });
   const mapRef = useRef<HTMLDivElement>(null);
@@ -323,30 +489,42 @@ export default function WarehouseMap({ warehouses, selectedWarehouseId, onSelect
   const fitView = useCallback(() => {
     if (!mapRef.current || locations.length === 0 || !selectedWarehouse) return;
     
-    // Calculate the dimensions from the buildGrid output
-    // Calculate the dimensions using constants
-    const { nZ, nR, nB } = buildGrid(locations, selectedWarehouse);
-    const { VW, VH } = computeMapDimensions(nZ, nR, nB, selectedWarehouse.zones_per_row);
-
-    const containerW = mapRef.current.clientWidth;
-    const containerH = mapRef.current.clientHeight;
-
-    // Calculate scale to "contain" the screen (ensure entire grid fits in view)
-    const scaleW = containerW / VW;
-    const scaleH = containerH / VH;
-    const scale = Math.min(scaleW, scaleH) * 0.95;
-    const boundedScale = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, scale));
-    const dynamicMinZoom = parseFloat(boundedScale.toFixed(2));
-    
-    setMinZoom(dynamicMinZoom);
-
-    // Center it
-    const tx = (containerW - VW * boundedScale) / 2;
-    const ty = (containerH - VH * boundedScale) / 2;
-
-    setZoom(dynamicMinZoom);
-    setPan({ x: tx, y: ty });
+    requestAnimationFrame(() => {
+      const { nZ, nR, nB } = buildGrid(locations, selectedWarehouse);
+      const { VW, VH } = computeMapDimensions(nZ, nR, nB, selectedWarehouse.zones_per_row);
+  
+      const containerW = mapRef.current!.clientWidth;
+      const containerH = mapRef.current!.clientHeight;
+  
+      const scaleX = containerW / VW;
+      const scaleY = containerH / VH;
+  
+      // Leave some margin
+      const baseScale = Math.min(scaleX, scaleY) * 0.9;
+      const boundedScale = parseFloat(Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, baseScale)).toFixed(2));
+  
+      // Calculate auto minZoom to prevent zooming out too far into empty space
+      const dynamicMinZoom = Math.max(ZOOM_MIN, Math.min(scaleX, scaleY) * 0.85);
+      setMinZoom(parseFloat(dynamicMinZoom.toFixed(2)));
+  
+      const tx = (containerW - VW * boundedScale) / 2;
+      const ty = (containerH - VH * boundedScale) / 2;
+  
+      setZoom(boundedScale > ZOOM_MAX ? ZOOM_MAX : boundedScale);
+      setPan({ x: tx, y: ty });
+    });
   }, [locations, selectedWarehouse]);
+
+  // Handle external focus requests
+  useEffect(() => {
+    if (externalFocusLocationId && locations.length > 0) {
+      const loc = locations.find(l => l.id === externalFocusLocationId);
+      if (loc) {
+        setSelectedLocation(loc);
+        if (onClearFocus) onClearFocus();
+      }
+    }
+  }, [externalFocusLocationId, locations, onClearFocus, fitView]);
 
   // Pan boundary clamp
   const clampPan = useCallback((x: number, y: number, currentZoom: number) => {
@@ -361,11 +539,13 @@ export default function WarehouseMap({ warehouses, selectedWarehouseId, onSelect
     const scaledW = VW * currentZoom;
     const scaledH = VH * currentZoom;
     
-    const buffer = 100; // at least 100px remains visible
+    // Keep at least 50% of the map visible inside the viewport
+    const bufferX = scaledW * 0.5;
+    const bufferY = scaledH * 0.5;
     
     return {
-      x: Math.min(Math.max(x, buffer - scaledW), containerW - buffer),
-      y: Math.min(Math.max(y, buffer - scaledH), containerH - buffer)
+      x: Math.min(Math.max(x, bufferX - scaledW), containerW - bufferX),
+      y: Math.min(Math.max(y, bufferY - scaledH), containerH - bufferY)
     };
   }, [locations, selectedWarehouse]);
 
@@ -380,8 +560,8 @@ export default function WarehouseMap({ warehouses, selectedWarehouseId, onSelect
     }
   }, [locations, fitView]);
 
-  // Zoom handlers
-  const handleWheel = useCallback((e: React.WheelEvent) => {
+  // Zoom handlers — use native event to avoid passive listener issue
+  const handleWheel = useCallback((e: WheelEvent) => {
     e.preventDefault();
     if (!mapRef.current) return;
     
@@ -401,7 +581,15 @@ export default function WarehouseMap({ warehouses, selectedWarehouseId, onSelect
     });
     
     setZoom(parseFloat(newZoom.toFixed(2)));
-  }, [zoom]);
+  }, [zoom, minZoom, clampPan]);
+
+  // Register wheel with { passive: false } to allow preventDefault
+  useEffect(() => {
+    const el = mapRef.current;
+    if (!el) return;
+    el.addEventListener("wheel", handleWheel, { passive: false });
+    return () => el.removeEventListener("wheel", handleWheel);
+  }, [handleWheel]);
 
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
     if (e.button !== 0) return;
@@ -419,37 +607,81 @@ export default function WarehouseMap({ warehouses, selectedWarehouseId, onSelect
 
   const handleMouseUp = useCallback(() => { dragging.current = false; }, []);
 
-  const resetView = () => { fitView(); };
+  const resetView = () => { setRotation(0); fitView(); };
+
+  // Fullscreen
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const mapContainerRef = useRef<HTMLDivElement>(null);
+
+  const toggleFullscreen = useCallback(() => {
+    if (!mapContainerRef.current) return;
+    if (!document.fullscreenElement) {
+      mapContainerRef.current.requestFullscreen().catch(() => {});
+    } else {
+      document.exitFullscreen().catch(() => {});
+    }
+  }, []);
+
+  useEffect(() => {
+    const handler = () => setIsFullscreen(!!document.fullscreenElement);
+    document.addEventListener("fullscreenchange", handler);
+    return () => document.removeEventListener("fullscreenchange", handler);
+  }, []);
 
   // All-warehouse picker
   if (!selectedWarehouseId || selectedWarehouseId === "all") {
+    const filteredWarehouses = warehouses.filter(wh => 
+      wh.name.toLowerCase().includes(searchWarehouse.toLowerCase()) || 
+      wh.location?.toLowerCase().includes(searchWarehouse.toLowerCase())
+    );
+
     return (
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        {warehouses.map(wh => (
-          <button key={wh.id} onClick={() => onSelectWarehouse(wh.id)}
-            className="bg-white dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-700 rounded-2xl p-6 text-left hover:border-taika-blue dark:hover:border-blue-500 hover:shadow-lg transition-all group cursor-pointer">
-            <div className="flex items-center gap-3 mb-3">
-              <div className="w-10 h-10 bg-taika-blue-light dark:bg-blue-500/10 rounded-xl flex items-center justify-center text-taika-blue dark:text-blue-400 group-hover:bg-taika-blue group-hover:text-white transition-all">
-                <MapPin size={20} />
-              </div>
-              <div>
-                <p className="font-bold text-neutral-900 dark:text-neutral-50">{wh.name}</p>
-                <p className="text-xs text-neutral-400 dark:text-neutral-500">{wh.location}</p>
-              </div>
-            </div>
-            <div className="flex gap-4 text-xs text-neutral-500 dark:text-neutral-400">
-              <span className="flex items-center gap-1"><Thermometer size={12} />{wh.temperature_zone || "N/A"}</span>
-              <span>{wh.total_zones} zones</span>
-            </div>
-          </button>
-        ))}
+      <div className="space-y-4">
+        <div className="relative w-full md:w-80">
+          <Search size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-neutral-400 pointer-events-none" />
+          <input
+            type="text"
+            value={searchWarehouse}
+            onChange={(e) => setSearchWarehouse(e.target.value)}
+            placeholder={t("search", "Tìm kiếm...")}
+            className="w-full pl-10 pr-4 py-3 bg-white dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-700 rounded-2xl text-sm font-bold outline-none focus:ring-2 focus:ring-taika-blue text-neutral-900 dark:text-neutral-50"
+          />
+        </div>
+        
+        {filteredWarehouses.length === 0 ? (
+          <div className="py-12 text-center bg-white dark:bg-neutral-950 rounded-2xl border border-neutral-200 dark:border-neutral-700">
+            <Search size={32} className="mx-auto text-neutral-300 dark:text-neutral-700 mb-3" />
+            <p className="text-neutral-400 text-sm font-medium">{t("no_results", "Không tìm thấy kết quả")}</p>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {filteredWarehouses.map(wh => (
+              <button key={wh.id} onClick={() => onSelectWarehouse(wh.id)}
+                className="bg-white dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-700 rounded-2xl p-6 text-left hover:border-taika-blue dark:hover:border-blue-500 hover:shadow-lg transition-all group cursor-pointer">
+                <div className="flex items-center gap-3 mb-3">
+                  <div className="w-10 h-10 bg-taika-blue-light dark:bg-blue-500/10 rounded-xl flex items-center justify-center text-taika-blue dark:text-blue-400 group-hover:bg-taika-blue group-hover:text-white transition-all">
+                    <MapPin size={20} />
+                  </div>
+                  <div>
+                    <p className="font-bold text-neutral-900 dark:text-neutral-50">{wh.name}</p>
+                    <p className="text-xs text-neutral-400 dark:text-neutral-500">{wh.location}</p>
+                  </div>
+                </div>
+                <div className="flex gap-4 text-xs text-neutral-500 dark:text-neutral-400">
+                  <span className="flex items-center gap-1"><Thermometer size={12} />{wh.temperature_zone || "N/A"}</span>
+                  <span>{wh.total_zones} zones</span>
+                </div>
+              </button>
+            ))}
+          </div>
+        )}
       </div>
     );
   }
 
   return (
-    <div className="relative min-h-0">
-      <div className="flex-1 flex flex-col gap-3 min-w-0">
+    <div ref={mapContainerRef} className={cn("relative min-h-0", isFullscreen && "bg-white dark:bg-neutral-950 p-4 h-screen flex flex-col")}>
+      <div className={cn("flex-1 flex flex-col gap-3 min-w-0", isFullscreen && "h-full")}>
         {/* Warehouse tabs */}
         <div className="flex items-center gap-2 flex-wrap">
           {warehouses.map(wh => (
@@ -482,44 +714,74 @@ export default function WarehouseMap({ warehouses, selectedWarehouseId, onSelect
               <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-neutral-400 pointer-events-none" />
               <select value={searchSku} onChange={e => setSearchSku(e.target.value)}
                 className="w-full pl-9 pr-6 py-1.5 text-xs font-bold bg-neutral-50 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-lg outline-none focus:ring-1 focus:ring-taika-blue text-neutral-800 dark:text-neutral-200 appearance-none cursor-pointer">
-                <option value="">Kiểm tra sản phẩm...</option>
+                <option value="">{t("search_product", "Kiểm tra sản phẩm...")}</option>
                 {productsInWarehouse.map(p => (
                    <option key={p.sku} value={p.sku}>[{p.sku}] {p.name}</option>
                 ))}
               </select>
             </div>
 
-            {/* Zoom controls in meta bar */}
+            {/* 2D/3D toggle + Zoom controls in meta bar */}
             <div className="ml-auto flex items-center gap-1">
-              <button onClick={() => setZoom(z => Math.min(ZOOM_MAX, parseFloat((z + ZOOM_STEP).toFixed(2))))}
-                className="w-7 h-7 flex items-center justify-center bg-neutral-100 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg hover:bg-taika-blue hover:text-white hover:border-taika-blue transition-all text-xs font-bold text-neutral-600 dark:text-neutral-300">
-                <ZoomIn size={13} />
+              {/* 2D/3D toggle */}
+              <button
+                onClick={() => setViewMode(m => m === "2d" ? "3d" : "2d")}
+                className={cn(
+                  "h-7 px-2.5 flex items-center justify-center gap-1.5 border rounded-lg transition-all text-xs font-bold mr-1",
+                  viewMode === "3d"
+                    ? "bg-gradient-to-r from-blue-600 to-purple-600 border-blue-500 text-white shadow-lg shadow-blue-500/20"
+                    : "bg-neutral-100 dark:bg-neutral-800 border-neutral-200 dark:border-neutral-700 text-neutral-600 dark:text-neutral-300 hover:bg-taika-blue hover:text-white hover:border-taika-blue"
+                )}
+                title={viewMode === "2d" ? t("view_3d", "Chế độ 3D") : t("view_2d", "Chế độ 2D")}
+              >
+                <Box size={12} />
+                <span>{viewMode === "2d" ? "3D" : "2D"}</span>
               </button>
-              <span className="w-12 text-center text-xs font-bold text-neutral-500 dark:text-neutral-400 tabular-nums">
-                {Math.round(zoom * 100)}%
-              </span>
-              <button onClick={() => setZoom(z => Math.max(minZoom, parseFloat((z - ZOOM_STEP).toFixed(2))))}
-                className="w-7 h-7 flex items-center justify-center bg-neutral-100 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg hover:bg-taika-blue hover:text-white hover:border-taika-blue transition-all text-xs font-bold text-neutral-600 dark:text-neutral-300">
-                <ZoomOut size={13} />
-              </button>
-              <button onClick={resetView}
+
+              {viewMode === "2d" && (
+                <>
+                  <button onClick={() => setZoom(z => Math.min(ZOOM_MAX, parseFloat((z + ZOOM_STEP).toFixed(2))))}
+                    className="w-7 h-7 flex items-center justify-center bg-neutral-100 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg hover:bg-taika-blue hover:text-white hover:border-taika-blue transition-all text-xs font-bold text-neutral-600 dark:text-neutral-300">
+                    <ZoomIn size={13} />
+                  </button>
+                  <span className="w-12 text-center text-xs font-bold text-neutral-500 dark:text-neutral-400 tabular-nums">
+                    {Math.round(zoom * 100)}%
+                  </span>
+                  <button onClick={() => setZoom(z => Math.max(minZoom, parseFloat((z - ZOOM_STEP).toFixed(2))))}
+                    className="w-7 h-7 flex items-center justify-center bg-neutral-100 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg hover:bg-taika-blue hover:text-white hover:border-taika-blue transition-all text-xs font-bold text-neutral-600 dark:text-neutral-300">
+                    <ZoomOut size={13} />
+                  </button>
+                  <button onClick={resetView}
+                    className="w-7 h-7 flex items-center justify-center bg-neutral-100 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg hover:bg-taika-blue hover:text-white hover:border-taika-blue transition-all text-neutral-500 dark:text-neutral-400"
+                    title="Trả sơ đồ về giữa">
+                    <Focus size={12} />
+                  </button>
+                  <button onClick={() => setRotation(r => (r + 90) % 360)}
+                    className="w-7 h-7 flex items-center justify-center bg-neutral-100 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg hover:bg-taika-blue hover:text-white hover:border-taika-blue transition-all text-neutral-500 dark:text-neutral-400"
+                    title={`Xoay sơ đồ (${rotation}°)`}>
+                    <RotateCw size={12} />
+                  </button>
+                </>
+              )}
+              <button onClick={toggleFullscreen}
                 className="w-7 h-7 flex items-center justify-center bg-neutral-100 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg hover:bg-taika-blue hover:text-white hover:border-taika-blue transition-all text-neutral-500 dark:text-neutral-400"
-                title="Reset view">
-                <Maximize2 size={12} />
+                title={isFullscreen ? "Thoát toàn màn hình" : "Toàn màn hình"}>
+                {isFullscreen ? <Minimize2 size={12} /> : <Maximize2 size={12} />}
               </button>
             </div>
           </div>
         )}
 
-        {/* Map canvas */}
+        {/* Map canvas - 2D or 3D */}
+        {viewMode === "2d" ? (
         <div
           ref={mapRef}
           className={cn(
             "flex-1 bg-white dark:bg-neutral-950 rounded-2xl border border-neutral-200 dark:border-neutral-700 overflow-hidden relative",
-            "min-h-[60vh] xl:min-h-[calc(100vh-280px)] select-none"
+            isFullscreen ? "min-h-0" : "min-h-[60vh] xl:min-h-[calc(100vh-280px)]",
+            "select-none"
           )}
           style={{ cursor: dragging.current ? "grabbing" : "grab" }}
-          onWheel={handleWheel}
           onMouseDown={handleMouseDown}
           onMouseMove={handleMouseMove}
           onMouseUp={handleMouseUp}
@@ -543,27 +805,68 @@ export default function WarehouseMap({ warehouses, selectedWarehouseId, onSelect
               style={{
                 transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
                 transformOrigin: "top left",
-                transition: dragging.current ? "none" : "transform 0.05s ease-out",
+                transition: dragging.current ? "none" : "transform 0.15s ease-out",
                 willChange: "transform",
-                padding: "12px",
                 display: "inline-block",
               }}
             >
+              <div
+                style={{
+                  transform: `rotate(${rotation}deg)`,
+                  transformOrigin: "center center",
+                  transition: dragging.current ? "none" : "transform 0.25s ease-out",
+                  padding: "12px",
+                  display: "inline-block",
+                }}
+              >
               {locations.length === 0 ? (
                 <div className="py-20 px-10 text-center">
                   <MapPin size={40} className="mx-auto text-neutral-300 dark:text-neutral-700 mb-3" />
-                  <p className="text-neutral-400 text-sm font-medium">Chưa có vị trí. Vào Cài đặt → Tạo lưới.</p>
+                  <p className="text-neutral-400 text-sm font-medium">{t("no_locations_hint")}</p>
                 </div>
               ) : (
                 <FloorPlanSVG
                   locations={locations}
                   warehouse={selectedWarehouse}
                   isDark={isDark}
-                  onBin={loc => setSelectedLocation(prev => prev?.id === loc?.id ? null : loc)}
-                  selectedId={selectedLocation?.id || null}
+                  onBin={loc => {
+                    // Bulk transfer mode handling
+                    if (bulkPhase === "select_source" && loc) {
+                      setBulkSourceLocs(prev => {
+                        const exists = prev.find(l => l.id === loc.id);
+                        if (exists) return prev.filter(l => l.id !== loc.id);
+                        if (loc.total_quantity > 0) return [...prev, loc];
+                        return prev;
+                      });
+                      return;
+                    }
+                    if (bulkPhase === "select_dest" && loc) {
+                      setBulkDestLocs(prev => {
+                        const exists = prev.find(l => l.id === loc.id);
+                        if (exists) return prev.filter(l => l.id !== loc.id);
+                        if (loc.utilization < 100) return [...prev, loc];
+                        return prev;
+                      });
+                      return;
+                    }
+                    // Normal mode
+                    if (showTransferModal && transferSource) {
+                      if (loc && loc.id !== transferSource.location.id) {
+                        setTransferDestLoc(loc);
+                      }
+                    } else {
+                      setSelectedLocation(prev => prev?.id === loc?.id ? null : loc);
+                    }
+                  }}
+                  selectedId={showTransferModal ? transferDestLoc?.id || null : selectedLocation?.id || null}
+                  sourceId={showTransferModal && transferSource ? transferSource.location.id : null}
                   searchSku={searchSku}
+                  bulkSelectedIds={bulkPhase === "select_source" ? bulkSourceIds : bulkPhase === "select_dest" ? bulkDestIds : undefined}
+                  bulkMode={bulkPhase === "select_source" ? "source" : bulkPhase === "select_dest" ? "dest" : null}
+                  destProjectedUsage={destProjectedUsage}
                 />
               )}
+              </div>
             </div>
           )}
 
@@ -575,7 +878,7 @@ export default function WarehouseMap({ warehouses, selectedWarehouseId, onSelect
             </button>
             <button onClick={resetView}
               className="w-8 h-8 flex items-center justify-center bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-700 rounded-xl hover:bg-taika-blue hover:text-white hover:border-taika-blue shadow-md transition-all text-neutral-500 dark:text-neutral-400">
-              <RotateCcw size={12} />
+              <Focus size={12} />
             </button>
             <button onClick={() => setZoom(z => Math.max(minZoom, parseFloat((z - ZOOM_STEP).toFixed(2))))}
               className="w-8 h-8 flex items-center justify-center bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-700 rounded-xl hover:bg-taika-blue hover:text-white hover:border-taika-blue shadow-md transition-all text-neutral-600 dark:text-neutral-300">
@@ -585,35 +888,146 @@ export default function WarehouseMap({ warehouses, selectedWarehouseId, onSelect
 
           {/* Scroll hint */}
           <div className="absolute bottom-3 left-3 text-[10px] text-neutral-400 dark:text-neutral-600 font-medium pointer-events-none">
-            Scroll để zoom • Kéo để di chuyển
+            {t("map_interaction_hint")}
           </div>
 
           {/* Detail panel as absolute overlay */}
           <div className="absolute top-4 right-4 bottom-4 z-20 pointer-events-none flex justify-end">
-            <AnimatePresence>
-              {selectedLocation && selectedWarehouse && (
-                <div className="pointer-events-auto h-full flex flex-col">
+            <>
+              {selectedLocation && selectedWarehouse && !showTransferModal && (
+                <div className="pointer-events-auto h-full flex flex-col" onMouseDown={e => e.stopPropagation()}>
                   <LocationDetailPanel
                     location={selectedLocation}
                     warehouse={selectedWarehouse}
                     onClose={() => setSelectedLocation(null)}
+                    onTransfer={openTransferModal}
                   />
                 </div>
               )}
-            </AnimatePresence>
+              {showTransferModal && transferSource && (
+                 <div className="pointer-events-auto h-full flex flex-col" onMouseDown={e => e.stopPropagation()}>
+                   <TransferModal
+                     fromLocation={transferSource.location}
+                     fromWarehouse={transferSource.warehouse}
+                     currentMapWarehouseId={selectedWarehouseId}
+                     destLocationFromMap={transferDestLoc}
+                     onClose={closeTransferModal}
+                     onComplete={() => {
+                       closeTransferModal();
+                       fetchLocations(selectedWarehouseId);
+                       if (onDataChange) onDataChange();
+                     }}
+                   />
+                 </div>
+              )}
+            </>
+          </div>
+
+          {/* Bulk Transfer Wizard */}
+          {bulkPhase && bulkPhase !== "done" && (
+            <BulkTransferWizard
+              phase={bulkPhase}
+              setPhase={(p) => {
+                setBulkPhase(p);
+                if (p === "select_dest") setBulkDestLocs([]);
+              }}
+              selectedSourceLocs={bulkSourceLocs}
+              selectedDestLocs={bulkDestLocs}
+              warehouses={warehouses}
+              sourceWarehouse={warehouses.find(w => w.id === bulkSourceWarehouseId)}
+              destWarehouseId={bulkDestWarehouseId}
+              setDestWarehouseId={setBulkDestWarehouseId}
+              onClose={closeBulkMode}
+              onComplete={() => {
+                closeBulkMode();
+                fetchLocations(selectedWarehouseId);
+                if (onDataChange) onDataChange();
+              }}
+              onSwitchWarehouse={(id) => onSelectWarehouse(id)}
+            />
+          )}
+        </div>
+        ) : (
+        /* ── 3D View ── */
+        <div className={cn(
+          "flex-1 rounded-2xl border border-neutral-200 dark:border-neutral-700 overflow-hidden relative",
+          isFullscreen ? "min-h-0" : "min-h-[60vh] xl:min-h-[calc(100vh-280px)]"
+        )}>
+          {loading && (
+            <div className="absolute inset-0 flex items-center justify-center bg-neutral-950/80 z-10">
+              <Loader2 className="w-7 h-7 animate-spin text-taika-blue" />
+            </div>
+          )}
+          {error && (
+            <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-neutral-950">
+              <AlertCircle className="w-10 h-10 text-red-400" />
+              <p className="text-sm text-neutral-500">{error}</p>
+              <button onClick={() => fetchLocations(selectedWarehouseId)}
+                className="px-4 py-2 bg-taika-blue text-white rounded-xl text-sm font-bold">Thử lại</button>
+            </div>
+          )}
+          {!loading && !error && selectedWarehouse && locations.length > 0 && (
+            <div className="absolute inset-0 z-0">
+              <Suspense fallback={
+                <div className="flex items-center justify-center h-full bg-neutral-950">
+                  <div className="text-center">
+                    <Loader2 className="w-8 h-8 animate-spin text-taika-blue mx-auto mb-3" />
+                    <p className="text-sm text-neutral-400 font-medium">Đang tải mô hình 3D...</p>
+                  </div>
+                </div>
+              }>
+                <WarehouseMap3D
+                  locations={locations}
+                  warehouse={selectedWarehouse}
+                  searchSku={searchSku}
+                  onBin={loc => {
+                    setSelectedLocation(prev => prev?.id === loc?.id ? null : loc);
+                  }}
+                  selectedId={selectedLocation?.id || null}
+                />
+              </Suspense>
+            </div>
+          )}
+          {!loading && !error && locations.length === 0 && (
+            <div className="flex items-center justify-center h-full bg-neutral-950">
+              <div className="text-center">
+                <MapPin size={40} className="mx-auto text-neutral-700 mb-3" />
+                <p className="text-neutral-500 text-sm font-medium">{t("no_locations_hint")}</p>
+              </div>
+            </div>
+          )}
+
+          {/* Detail panel overlay for 3D */}
+          <div className="absolute top-4 right-4 bottom-4 z-20 pointer-events-none flex justify-end">
+            {selectedLocation && selectedWarehouse && (
+              <div className="pointer-events-auto h-full flex flex-col">
+                <LocationDetailPanel
+                  location={selectedLocation}
+                  warehouse={selectedWarehouse}
+                  onClose={() => setSelectedLocation(null)}
+                  onTransfer={openTransferModal}
+                />
+              </div>
+            )}
+          </div>
+
+          {/* 3D interaction hint */}
+          <div className="absolute bottom-3 left-3 text-[10px] text-neutral-500 font-medium pointer-events-none">
+            🖱️ Chuột trái xoay • Scroll zoom • Chuột phải kéo
           </div>
         </div>
+        )}
 
         {/* Legend */}
         {!loading && !error && locations.length > 0 && (
           <div className="flex flex-wrap gap-3 px-1">
             {[
-              { c: "bg-neutral-200 dark:bg-neutral-700 border border-neutral-300 dark:border-neutral-600", label: "Trống" },
-              { c: "bg-green-500", label: "Có hàng" },
-              { c: "bg-emerald-500", label: "Đầy (≥90%)" },
-              { c: "bg-orange-500", label: "Sắp hết hạn" },
-              { c: "bg-red-500", label: "Cảnh báo QC" },
-              { c: "bg-amber-400", label: "Bảo trì" },
+              { c: "bg-neutral-200 dark:bg-neutral-700 border border-neutral-300 dark:border-neutral-600", label: t("legend_empty") },
+              { c: "bg-green-500", label: t("legend_has_stock") },
+              { c: "bg-emerald-500", label: t("legend_full") },
+              { c: "bg-orange-500", label: t("legend_expiring") },
+              { c: "bg-red-500", label: t("legend_qc_warning") },
+              { c: "bg-amber-400", label: t("legend_maintenance") },
             ].map(item => (
               <div key={item.label} className="flex items-center gap-1.5">
                 <div className={cn("w-3 h-2.5 rounded-sm", item.c)} />

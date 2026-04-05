@@ -21,10 +21,12 @@ import {
   Loader2,
   ArrowDownLeft,
   ArrowUpRight,
+  Users,
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { cn } from "./lib/utils";
 import { AuthProvider, useAuth } from "./contexts/AuthContext";
+import { PreferencesProvider, usePreferences } from "./contexts/PreferencesContext";
 
 // Views
 import DashboardView from "./views/DashboardView";
@@ -36,9 +38,13 @@ import InboundView from "./views/InboundView";
 import OutboundView from "./views/OutboundView";
 import StatisticsView from "./views/StatisticsView";
 import ReportsView from "./views/ReportsView";
+import ProductDetailView from "./views/ProductDetailView";
 import ScannerView from "./views/ScannerView";
 import SettingsView from "./views/SettingsView";
 import LoginView from "./views/LoginView";
+import SupplierDetailView from "./views/SupplierDetailView";
+import CustomersView from "./views/CustomersView";
+import CustomerDetailView from "./views/CustomerDetailView";
 
 // Role-based nav config
 type NavItem = {
@@ -53,6 +59,7 @@ const NAV_CONFIG: NavItem[] = [
   { id: "inventory", labelKey: "inventory", icon: Boxes, roles: ["admin", "manager", "worker"] },
   { id: "products", labelKey: "products", icon: Package, roles: ["admin", "manager", "worker"] },
   { id: "suppliers", labelKey: "suppliers", icon: Truck, roles: ["admin", "manager"] },
+  { id: "customers", labelKey: "customers", icon: Users, roles: ["admin", "manager"] },
   { id: "inbound", labelKey: "inbound", icon: ArrowDownLeft, roles: ["admin", "manager", "worker"] },
   { id: "outbound", labelKey: "outbound", icon: ArrowUpRight, roles: ["admin", "manager", "worker"] },
   { id: "activities", labelKey: "activities", icon: Activity, roles: ["admin", "manager"] },
@@ -67,6 +74,10 @@ function AppShell() {
   const { profile, logout, hasRole } = useAuth();
   const [isSidebarOpen, setSidebarOpen] = useState(window.innerWidth > 1024);
   const [activeTab, setActiveTab] = useState("dashboard");
+  const [activeSupplierId, setActiveSupplierId] = useState<string | null>(null);
+  const [activeProductId, setActiveProductId] = useState<string | null>(null);
+  const [activeCustomerId, setActiveCustomerId] = useState<string | null>(null);
+  const [supplierSection, setSupplierSection] = useState<"details" | "history">("details");
   const [showModal, setShowModal] = useState<string | null>(null);
   const [isDarkMode, setIsDarkMode] = useState(() => {
     if (typeof window !== 'undefined') {
@@ -85,6 +96,87 @@ function AppShell() {
     }
     localStorage.setItem('darkMode', isDarkMode.toString());
   }, [isDarkMode]);
+
+  useEffect(() => {
+    const handleNavSupplier = (e: any) => {
+      if (e.detail?.id) {
+        setActiveTab("suppliers");
+        setActiveSupplierId(e.detail.id);
+        setSupplierSection(e.detail.section || "details");
+      }
+    };
+    const handleNavProduct = (e: any) => {
+      if (e.detail?.id) {
+        setActiveTab("products");
+        setActiveProductId(e.detail.id);
+      }
+    };
+    const handleNavCustomer = (e: any) => {
+      if (e.detail?.id) {
+        setActiveTab("customers");
+        setActiveCustomerId(e.detail.id);
+      }
+    };
+    const handleNavWarehouseLocation = (e: any) => {
+      if (e.detail?.warehouseId) {
+        const detail = { warehouseId: e.detail.warehouseId, locationId: e.detail.locationId };
+        // Set pending nav so InventoryView can pick it up on mount
+        (window as any).__pendingWarehouseNav = detail;
+        setActiveTab("inventory");
+        // Also dispatch events as fallback
+        setTimeout(() => {
+          window.dispatchEvent(new CustomEvent("navigate-to-warehouse-map", { detail }));
+        }, 400);
+      }
+    };
+    const handleNavShipment = (e: any) => {
+      if (e.detail?.id) {
+        (window as any).__pendingShipmentNav = e.detail.id;
+        setActiveTab("inbound");
+        setTimeout(() => window.dispatchEvent(new CustomEvent("focus-shipment", { detail: { id: e.detail.id } })), 400);
+      }
+    };
+    const handleNavOrder = (e: any) => {
+      if (e.detail?.id) {
+        (window as any).__pendingOrderNav = e.detail.id;
+        setActiveTab("outbound");
+        setTimeout(() => window.dispatchEvent(new CustomEvent("focus-order", { detail: { id: e.detail.id } })), 400);
+      }
+    };
+
+    const handleNavNewInbound = (e: any) => {
+      if (e.detail?.items) {
+        (window as any).__pendingScannedItems = e.detail.items;
+        setActiveTab("inbound");
+      }
+    };
+    const handleNavNewOutbound = (e: any) => {
+      if (e.detail?.items) {
+        (window as any).__pendingScannedItems = e.detail.items;
+        setActiveTab("outbound");
+      }
+    };
+
+    window.addEventListener("nav-supplier", handleNavSupplier);
+    window.addEventListener("nav-product", handleNavProduct);
+    window.addEventListener("nav-customer", handleNavCustomer);
+    window.addEventListener("nav-warehouse-location", handleNavWarehouseLocation);
+    window.addEventListener("nav-shipment", handleNavShipment);
+    window.addEventListener("nav-order", handleNavOrder);
+    window.addEventListener("nav-new-inbound-wizard", handleNavNewInbound);
+    window.addEventListener("nav-new-outbound-wizard", handleNavNewOutbound);
+    return () => {
+      window.removeEventListener("nav-supplier", handleNavSupplier);
+      window.removeEventListener("nav-product", handleNavProduct);
+      window.removeEventListener("nav-customer", handleNavCustomer);
+      window.removeEventListener("nav-customer", handleNavCustomer);
+      window.removeEventListener("nav-warehouse-location", handleNavWarehouseLocation);
+      window.removeEventListener("nav-shipment", handleNavShipment);
+      window.removeEventListener("nav-order", handleNavOrder);
+      window.removeEventListener("nav-new-inbound-wizard", handleNavNewInbound);
+      window.removeEventListener("nav-new-outbound-wizard", handleNavNewOutbound);
+    };
+  }, []);
 
   const toggleDarkMode = () => setIsDarkMode(!isDarkMode);
   const toggleSidebar = () => setSidebarOpen(!isSidebarOpen);
@@ -175,6 +267,9 @@ function AppShell() {
               key={item.id}
               onClick={() => {
                 setActiveTab(item.id);
+                setActiveSupplierId(null);
+                setActiveProductId(null);
+                setActiveCustomerId(null);
                 if (window.innerWidth < 1024) setSidebarOpen(false);
               }}
               className={cn(
@@ -286,10 +381,37 @@ function AppShell() {
               exit={{ opacity: 0, y: -10 }}
               transition={{ duration: 0.2 }}
             >
-              {activeTab === "dashboard" && <DashboardView onAction={(action) => setShowModal(action)} />}
+              {activeTab === "dashboard" && <DashboardView onAction={(action) => {
+                if (action === "internal_transfer") {
+                  setActiveTab("inventory");
+                  // Dispatch event so InventoryView can activate bulk mode
+                  setTimeout(() => window.dispatchEvent(new CustomEvent("activate-bulk-transfer")), 100);
+                } else {
+                  setShowModal(action);
+                }
+              }} />}
               {activeTab === "inventory" && <InventoryView onAction={(action) => setShowModal(action)} />}
-              {activeTab === "products" && <ProductsView onAction={(action) => setShowModal(action)} />}
-              {activeTab === "suppliers" && hasRole("admin", "manager") && <SuppliersView onAction={(action) => setShowModal(action)} />}
+              {activeTab === "products" && (
+                activeProductId ? (
+                  <ProductDetailView productId={activeProductId} onBack={() => setActiveProductId(null)} />
+                ) : (
+                  <ProductsView onAction={(action) => setShowModal(action)} />
+                )
+              )}
+              {activeTab === "suppliers" && hasRole("admin", "manager") && (
+                activeSupplierId ? (
+                  <SupplierDetailView supplierId={activeSupplierId} defaultSection={supplierSection} onBack={() => setActiveSupplierId(null)} />
+                ) : (
+                  <SuppliersView onNavigateDetail={(id, section) => { setActiveSupplierId(id); setSupplierSection(section || "details"); }} />
+                )
+              )}
+              {activeTab === "customers" && hasRole("admin", "manager") && (
+                activeCustomerId ? (
+                  <CustomerDetailView customerId={activeCustomerId} onBack={() => setActiveCustomerId(null)} />
+                ) : (
+                  <CustomersView onNavigateDetail={(id) => setActiveCustomerId(id)} />
+                )
+              )}
               {activeTab === "inbound" && <InboundView />}
               {activeTab === "outbound" && <OutboundView />}
               {activeTab === "activities" && hasRole("admin", "manager") && <ActivitiesView />}
@@ -390,53 +512,10 @@ function AppShell() {
                     </div>
                   )}
 
-                  {showModal === "internal_transfer" && (
-                    <div className="space-y-6">
-                      <div className="grid grid-cols-2 gap-6">
-                        <div className="space-y-2">
-                          <label className="text-xs font-black text-neutral-300 dark:text-neutral-600 uppercase tracking-widest">From Warehouse</label>
-                          <select className="w-full p-4 bg-neutral-50 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-700 rounded-2xl outline-none focus:ring-2 focus:ring-blue-500 font-medium">
-                            <option>Cold Storage A</option>
-                            <option>Cold Storage B</option>
-                          </select>
-                        </div>
-                        <div className="space-y-2">
-                          <label className="text-xs font-black text-neutral-300 dark:text-neutral-600 uppercase tracking-widest">To Warehouse</label>
-                          <select className="w-full p-4 bg-neutral-50 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-700 rounded-2xl outline-none focus:ring-2 focus:ring-blue-500 font-medium">
-                            <option>Cold Storage B</option>
-                            <option>Cold Storage A</option>
-                          </select>
-                        </div>
-                      </div>
-                      <div className="space-y-2">
-                        <label className="text-xs font-black text-neutral-300 dark:text-neutral-600 uppercase tracking-widest">Reason for Transfer</label>
-                        <textarea className="w-full p-4 bg-neutral-50 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-700 rounded-2xl outline-none focus:ring-2 focus:ring-taika-blue font-medium h-32" placeholder="e.g. Re-organizing stock for export shipment..." />
-                      </div>
-                    </div>
-                  )}
 
-                  {showModal === "add_supplier" && (
-                    <div className="space-y-6">
-                      <div className="space-y-2">
-                        <label className="text-xs font-black text-neutral-300 dark:text-neutral-600 uppercase tracking-widest">Supplier Name</label>
-                        <input type="text" className="w-full p-4 bg-neutral-50 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-700 rounded-2xl outline-none focus:ring-2 focus:ring-blue-500 font-medium" placeholder="e.g. Mekong Delta Seafood Co." />
-                      </div>
-                      <div className="grid grid-cols-2 gap-6">
-                        <div className="space-y-2">
-                          <label className="text-xs font-black text-neutral-300 dark:text-neutral-600 uppercase tracking-widest">Contact Person</label>
-                          <input type="text" className="w-full p-4 bg-neutral-50 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-700 rounded-2xl outline-none focus:ring-2 focus:ring-blue-500 font-medium" placeholder="Nguyen Van A" />
-                        </div>
-                        <div className="space-y-2">
-                          <label className="text-xs font-black text-neutral-300 dark:text-neutral-600 uppercase tracking-widest">Phone Number</label>
-                          <input type="text" className="w-full p-4 bg-neutral-50 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-700 rounded-2xl outline-none focus:ring-2 focus:ring-blue-500 font-medium" placeholder="+84 123 456 789" />
-                        </div>
-                      </div>
-                      <div className="space-y-2">
-                        <label className="text-xs font-black text-neutral-300 dark:text-neutral-600 uppercase tracking-widest">Address</label>
-                        <input type="text" className="w-full p-4 bg-neutral-50 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-700 rounded-2xl outline-none focus:ring-2 focus:ring-blue-500 font-medium" placeholder="123 Tran Hung Dao, Can Tho" />
-                      </div>
-                    </div>
-                  )}
+
+
+
                 </div>
 
                 <div className="p-8 border-t border-neutral-100 dark:border-neutral-800 bg-neutral-50/50 dark:bg-neutral-900/50 flex justify-end gap-4">
@@ -465,13 +544,30 @@ function AppShell() {
 export default function App() {
   return (
     <AuthProvider>
-      <AppContent />
+      <PreferencesProvider>
+        <AppContent />
+      </PreferencesProvider>
     </AuthProvider>
   );
 }
 
 function AppContent() {
   const { user, loading } = useAuth();
+  const { preferences } = usePreferences();
+
+  useEffect(() => {
+    if (preferences.theme_mode === "dark") {
+      document.documentElement.classList.add("dark");
+    } else if (preferences.theme_mode === "light") {
+      document.documentElement.classList.remove("dark");
+    } else {
+      if (window.matchMedia("(prefers-color-scheme: dark)").matches) {
+        document.documentElement.classList.add("dark");
+      } else {
+        document.documentElement.classList.remove("dark");
+      }
+    }
+  }, [preferences.theme_mode]);
 
   if (loading) {
     return (
