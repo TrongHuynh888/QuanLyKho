@@ -103,9 +103,10 @@ Tính năng quét QR/Barcode yêu cầu quyền truy cập vào Camera của thi
 - **Localhost**: Trình duyệt sẽ cho phép truy cập camera vì `localhost` được xem là nguồn an toàn.
 - **Production Deploy**: Ứng dụng **BẮT BUỘC** phải được chạy trên giao thức **HTTPS**. Nếu chạy qua HTTP thông thường trên IP/Domain ngoài localhost, trình duyệt sẽ chặn API Camera vì lý do bảo mật.
 
-## 📄 Giấy phép (License)
+## 📄 Bản quyền & Giấy phép (License)
 
-Dự án này là sản phẩm phục vụ cho thực tập tốt nghiệp phát triển hệ thống cho **TAIKA SEAFOOD**. Vui lòng liên hệ tác giả trước khi sử dụng lại mã nguồn vào mục đích thương mại.
+Dự án này là sản phẩm phục vụ cho thực tập tốt nghiệp phát triển hệ thống cho **TAIKA SEAFOOD**.
+© 2026 Bản quyền thuộc về **Huỳnh Phú Trọng**. Vui lòng liên hệ tác giả trước khi sử dụng lại mã nguồn vào mục đích thương mại.
 
 ---
-*Phát triển bởi TAIKA SEAFOOD - Precision in Seafood Logistics.*
+*Phát triển bởi Huỳnh Phú Trọng x TAIKA SEAFOOD - Precision in Seafood Logistics.*
